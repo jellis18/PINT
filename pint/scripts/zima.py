@@ -48,12 +48,12 @@ def main(argv=None):
 
     tl = [toa.TOA(t,error=error, obs=args.obs, freq=freq,
                  scale=scale) for t in times]
-    del t
+
     ts = toa.TOAs(toalist=tl)
 
     # WARNING! I'm not sure how clock corrections should be handled here!
     # Do we apply them, or not?
-    if not any([f.has_key('clkcorr') for f in ts.table['flags']]):
+    if not any(['clkcorr' in f for f in ts.table['flags']]):
         log.info("Applying clock corrections.")
         ts.apply_clock_corrections()
     if 'tdb' not in ts.table.colnames:
@@ -63,18 +63,19 @@ def main(argv=None):
         log.info("Computing observatory positions and velocities.")
         ts.compute_posvels(args.ephem, args.planets)
 
-    F_local = m.d_phase_d_toa(ts)*u.Hz
-    rs = m.phase(ts.table).frac/F_local
+    # F_local has units of Hz; discard cycles unit in phase to get a unit
+    # that TimeDelta understands
+    F_local = m.d_phase_d_toa(ts)
+    rs = m.phase(ts.table).frac.value/F_local
 
     # Adjust the TOA times to put them where their residuals will be 0.0
     ts.adjust_TOAs(TimeDelta(-1.0*rs))
-    rspost = m.phase(ts.table).frac/F_local
+    rspost = m.phase(ts.table).frac.value/F_local
 
     # Do a second iteration
     ts.adjust_TOAs(TimeDelta(-1.0*rspost))
 
      # Write TOAs to a file
-    #ts.write_TOA_file(args.timfile,name='fake',format='Tempo2')
     ts.write_TOA_file(args.timfile,name='fake',format='Tempo2')
 
     if args.plot:

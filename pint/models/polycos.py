@@ -2,6 +2,7 @@
 # given interval using polynomial expansion. The return will be some necessary
 # information and the polynomial coefficients
 
+from __future__ import division, print_function
 import functools
 from ..phase import Phase
 import numpy as np
@@ -11,7 +12,6 @@ import astropy.units as u
 import astropy.constants as const
 import astropy.time as at
 from .parameter import Parameter
-from .timing_model import TimingModel, MissingParameter, Cache
 import astropy.table as table
 from astropy.io import registry
 MIN_PER_DAY = 60.0*24.0
@@ -183,7 +183,7 @@ def tempo_polyco_table_reader(filename):
             binaryPhase = np.longdouble(0.0)
 
         # Read coefficients
-        nCoeffLines = nCoeff/3
+        nCoeffLines = nCoeff//3
 
         if nCoeff%3>0:
             nCoeffLines += 1

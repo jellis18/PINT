@@ -1,5 +1,6 @@
 from pint.models import parameter as p
 from pint.models import model_builder as mb
+from pint import pint_units
 from pint.utils import str2longdouble
 from astropy.coordinates.angles import Angle
 import astropy.time as time
@@ -78,9 +79,9 @@ class TestParameters(unittest.TestCase):
         self.assertEqual(test_m.JUMP1.frozen, True)
         self.assertEqual(test_m.JUMP1.key, 'MJD')
         self.assertTrue(
-                numpy.isclose(test_m.JUMP1.key_value[0].value, 52742.0, atol=1e-10))
+                numpy.isclose(test_m.JUMP1.key_value[0], 52742.0, atol=1e-10))
         self.assertTrue(
-                numpy.isclose(test_m.JUMP1.key_value[1].value, 52745.0, atol=1e-10))
+                numpy.isclose(test_m.JUMP1.key_value[1], 52745.0, atol=1e-10))
         self.assertTrue(
                 numpy.isclose(test_m.JUMP1.value, 0.2))
 
@@ -104,7 +105,13 @@ class TestParameters(unittest.TestCase):
                 numpy.isclose(test_m.JUMP12.value, 0.1))
         self.assertTrue(
                 numpy.isclose(test_m.JUMP12.uncertainty_value, 2.0))
+        self.assertTrue(
+                numpy.isclose(test_m.RAJ.uncertainty_value, 476.94611148516092061223))
 
+        self.assertTrue(
+                numpy.isclose(test_m.DECJ.uncertainty_value, 190996312986311097848351.00000000000000000000))
+        self.assertTrue(test_m.RAJ.uncertainty.unit, pint_units['hourangle_second'])
+        self.assertTrue(test_m.RAJ.uncertainty.unit, u.arcsecond)
     def test_RAJ(self):
         """Check whether the value and units of RAJ parameter are ok"""
         units = u.hourangle
@@ -248,6 +255,14 @@ class TestParameters(unittest.TestCase):
         self.assertEqual(self.m.OM.quantity, quantity)
         self.assertRaises(ValueError, self.set_OM_to_none)
         self.assertRaises(TypeError, self.set_OM_to_time)
+
+    def test_PBDOT(self):
+        self.m.PBDOT.value = 20
+        self.assertEqual(self.m.PBDOT.units, 1e-12*u.day/u.day)
+        self.assertEqual(self.m.PBDOT.quantity, 20 * 1e-12*u.day/u.day)
+        self.m.PBDOT.value = 1e-11
+        self.assertEqual(self.m.PBDOT.units, u.day/u.day)
+        self.assertEqual(self.m.PBDOT.quantity, 1e-11 * u.day/u.day)
 
     def test_prefix_value_to_num(self):
         """Test setting the prefix parameter """

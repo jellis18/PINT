@@ -7,6 +7,7 @@ import numpy
 import astropy.time as time
 from astropy import log
 from pint import pint_units
+from pint import pulsar_mjd
 import astropy.units as u
 import astropy.constants as const
 from astropy.coordinates.angles import Angle
@@ -310,7 +311,8 @@ class Parameter(object):
             return ""
         line = "%-15s %25s" % (self.name, self.print_quantity(self.quantity))
         if self.uncertainty is not None:
-            line += " %d %s" % (0 if self.frozen else 1, str(self.uncertainty_value))
+            line += " %d %s" % (0 if self.frozen else 1, \
+                                self.print_uncertainty(self.uncertainty))
         elif not self.frozen:
             line += " 1"
         return line + "\n"
@@ -410,12 +412,16 @@ class floatParameter(Parameter):
     """
     def __init__(self, name=None, value=None, units=None, description=None,
                  uncertainty=None, frozen=True, aliases=None, continuous=True,
-                 long_double=False, **kwargs):
+                 long_double=False, unit_scale=False, scale_factor=None,
+                 scale_threshold=None, **kwargs):
         self.long_double = long_double
+        self.scale_factor = scale_factor
+        self.scale_threshold = scale_threshold
         set_quantity = self.set_quantity_float
         print_quantity = self.print_quantity_float
         get_value = self.get_value_float
         set_uncertainty = self.set_quantity_float
+        self._unit_scale = False
         super(floatParameter, self).__init__(name=name, value=value,
                                              units=units, frozen=True,
                                              aliases=aliases,
@@ -427,7 +433,11 @@ class floatParameter(Parameter):
                                              get_value=get_value,
                                              set_uncertainty=set_uncertainty)
         self.paramType = 'floatParameter'
-        self.special_arg += ['long_double',]
+        self.special_arg += ['long_double', 'unit_scale', 'scale_threshold',
+                             'scale_factor']
+        self.unit_scale = unit_scale
+        self._original_units = self.units
+
     @property
     def long_double(self):
         return self._long_double
@@ -452,6 +462,25 @@ class floatParameter(Parameter):
         else:
             self._long_double = val
 
+    @property
+    def unit_scale(self):
+        return self._unit_scale
+
+    @unit_scale.setter
+    def unit_scale(self, val):
+        old_unit_scale = self._unit_scale
+        self._unit_scale = val
+        if self._unit_scale:
+            if self.scale_factor is None:
+                raise ValueError("The scale factor should be given if unit_scale"
+                                 " is set to be True.")
+            if self.scale_threshold is None:
+                raise ValueError("The scale threshold should be given if unit_scale"
+                                 " is set to be True.")
+        else:
+            if old_unit_scale: # This makes sure the unit_scale if from True to false
+                self.units = self._original_units
+
     def set_quantity_float(self, val):
         """Set value method specific for float parameter
         accept format
@@ -462,10 +491,11 @@ class floatParameter(Parameter):
         # Check long_double
         if not self._long_double:
             setfunc_with_unit = lambda x: x
-            setfunc_no_unit = lambda x: fortran_float(x) * self.units
+            setfunc_no_unit = lambda x: fortran_float(x)
         else:
             setfunc_with_unit = lambda x: data2longdouble(x.value)*x.unit
-            setfunc_no_unit = lambda x:  data2longdouble(x) * self.units
+            setfunc_no_unit = lambda x:  data2longdouble(x)
+
         # First try to use astropy unit conversion
         try:
             # If this fails, it will raise UnitConversionError
@@ -473,7 +503,15 @@ class floatParameter(Parameter):
             result = setfunc_with_unit(val)
         except AttributeError:
             # This will happen if the input value did not have units
-            result = setfunc_no_unit(val)
+            num_value = setfunc_no_unit(val)
+            if self.unit_scale:
+                if num_value > self.scale_threshold:
+                    log.warning("Parameter %s's unit will be scaled to %s %s" \
+                             % (self.name, str(self.scale_factor), str(self.units)))
+                    self.units = self.scale_factor * self._original_units
+                else:
+                    self.units = self._original_units
+            result = (num_value) * self.units
 
         return result
 
@@ -683,8 +721,9 @@ class MJDParameter(Parameter):
             try:
                 result = time_from_mjd_string(val, self.time_scale)
             except:
-                raise ValueError('String ' + val + 'can not be converted to'
+                log.error('String ' + val + ' can not be converted to'
                                  'a time object.' )
+                raise
 
         elif isinstance(val,time.Time):
             result = val
@@ -742,13 +781,14 @@ class AngleParameter(Parameter):
         test1 (hourangle) 12:20:10.00000000
     """
     def __init__(self, name=None, value=None, description=None, units='rad',
-             uncertainty=None, frozen=True, continuous=True, aliases=None, **kwargs):
+             uncertainty=None, frozen=True, continuous=True, aliases=None,
+             **kwargs):
         self._str_unit = units
         self.unit_identifier = {
-            'h:m:s': (u.hourangle, 'h', '0:0:%.15fh'),
-            'd:m:s': (u.deg, 'd', '0:0:%.15fd'),
-            'rad': (u.rad, 'rad', '%.15frad'),
-            'deg': (u.deg, 'deg', '%.15fdeg'),
+            'h:m:s': (u.hourangle, 'h', pint_units['hourangle_second']),
+            'd:m:s': (u.deg, 'd', u.arcsec),
+            'rad': (u.rad, 'rad', u.rad),
+            'deg': (u.deg, 'deg', u.deg),
         }
         # Check unit format
         if units.lower() not in self.unit_identifier.keys():
@@ -756,9 +796,7 @@ class AngleParameter(Parameter):
 
         self.unitsuffix = self.unit_identifier[units.lower()][1]
         set_quantity = self.set_quantity_angle
-        print_quantity = lambda x: x.to_string(sep=':', precision=8) \
-                        if x.unit != u.rad else x.to_string(decimal = True,
-                        precision=8)
+        print_quantity = self.print_quantity_angle
         #get_value = lambda x: Angle(x * self.unit_identifier[units.lower()][0])
         get_value = lambda x: x.value
         set_uncertainty = self.set_uncertainty_angle
@@ -785,7 +823,7 @@ class AngleParameter(Parameter):
         3. number string
         """
         if isinstance(val, numbers.Number):
-            result = Angle(val * self.units)
+            result = Angle(data2longdouble(val) * self.units)
         elif isinstance(val, str):
             result = Angle(val + self.unitsuffix)
         elif hasattr(val, 'unit'):
@@ -799,20 +837,40 @@ class AngleParameter(Parameter):
         """This function is to set the uncertainty for an angle parameter.
         """
         if isinstance(val, numbers.Number):
-            result =Angle(self.unit_identifier[self._str_unit.lower()][2] % val)
+            result =Angle(val * self.unit_identifier[self._str_unit.lower()][2])
         elif isinstance(val, str):
 
-            result =Angle(self.unit_identifier[self._str_unit.lower()][2] \
-                          % fortran_float(val))
+            result =Angle(str2longdouble(val) * \
+                          self.unit_identifier[self._str_unit.lower()][2])
             #except:
             #    raise ValueError('Srting ' + val + ' can not be converted to'
             #                     ' astropy angle.')
         elif hasattr(val, 'unit'):
-            result = Angle(val.to(self.units))
+            result = Angle(val.to(self.unit_identifier[self._str_unit.lower()][2]))
         else:
             raise ValueError('Angle parameter can not accept '
                              + type(val).__name__ + 'format.')
         return result
+
+    def print_quantity_angle(self, quan):
+        """This is a function to print out the angle parameter.
+        """
+        if ':' in self._str_unit:
+            return quan.to_string(sep=':', precision=8)
+        else:
+            return quan.to_string(decimal = True, precision=15)
+
+    def print_uncertainty(self, unc):
+        """This is a function for printing out the uncertainty
+        """
+        if ':' in self._str_unit:
+            angle_arcsec = unc.to(u.arcsec)
+            if self.units == u.hourangle:
+                # Triditionaly hourangle uncertainty is in hourangle seconds
+                angle_arcsec  /= 15.0
+            return angle_arcsec.to_string(decimal = True, precision=20)
+        else:
+            return unc.to_string(decimal = True, precision=20)
 
 
 class prefixParameter(object):
@@ -855,9 +913,10 @@ class prefixParameter(object):
         Time scale for MJDParameter class.
     """
     def __init__(self, parameter_type='float',name=None, value=None, units=None,
-                 unitTplt=None, description=None, descriptionTplt=None,
+                 unit_template=None, description=None, description_template=None,
                  uncertainty=None, frozen=True, continuous=True,
-                 prefix_aliases=None, long_double=False, time_scale='utc',
+                 prefix_aliases=None, long_double=False, unit_scale=False, \
+                 scale_factor=None, scale_threshold=None,  time_scale='utc',
                  **kwargs):
         # Split prefixed name, if the name is not in the prefixed format, error
         # will be raised
@@ -874,8 +933,8 @@ class prefixParameter(object):
             raise ValueError("Unknow parameter type '"+ parameter_type + "' ")
 
         # Set up other attributes in the wrapper class
-        self.unit_template = unitTplt
-        self.description_template = descriptionTplt
+        self.unit_template = unit_template
+        self.description_template = description_template
         input_units = units
         input_description = description
         self.prefix_aliases = [] if prefix_aliases is None else prefix_aliases
@@ -892,6 +951,7 @@ class prefixParameter(object):
         aliases = []
         for pa in self.prefix_aliases:
             aliases.append(pa + self.idxfmt)
+        self.long_double = long_double
         # initiate parameter class
         self.param_comp = self.param_class(name=self.name, value=value,
                                            units=real_units,
@@ -901,7 +961,10 @@ class prefixParameter(object):
                                            continuous=continuous,
                                            aliases=aliases,
                                            long_double=long_double,
-                                           time_scale=time_scale)
+                                           time_scale=time_scale,
+                                           unit_scale=unit_scale, \
+                                           scale_factor=scale_factor,\
+                                           scale_threshold=scale_threshold)
         self.is_prefix = True
     # Define prpoerties for access the parameter composition
     @property
@@ -1035,7 +1098,7 @@ class prefixParameter(object):
 
         new_name = self.prefix + format(index, '0'+ str(len(self.idxfmt)))
         kws = dict()
-        for key in ['units', 'unitTplt', 'description','descriptionTplt',
+        for key in ['units', 'unit_template', 'description','description_template',
                     'frozen', 'continuous', 'prefix_aliases', 'long_double',
                     'time_scale', 'parameter_type']:
             if hasattr(self, key):
@@ -1090,7 +1153,7 @@ class maskParameter(floatParameter):
                  value=None, long_double=False, units= None, description=None,
                  uncertainty=None, frozen=True, continuous=False, aliases=None):
         self.is_mask = True
-        self.key_identifier = {'mjd': (lambda x: time.Time(x, format='mjd'), 2),
+        self.key_identifier = {'mjd': (lambda x: time.Time(x, format='mjd').mjd, 2),
                                 'freq': (float, 2),
                                 'name': (str, 1),
                                 'tel': (str, 1)}
@@ -1113,6 +1176,7 @@ class maskParameter(floatParameter):
         self.index = index
         name_param = name + str(index)
         self.origin_name = name
+        self.prefix = self.origin_name
         super(maskParameter, self).__init__(name=name_param, value=value,
                                             units=units,
                                             description=description,
@@ -1128,6 +1192,7 @@ class maskParameter(floatParameter):
             self.aliases.append(name)
         self.from_parfile_line = self.from_parfile_line_mask
         self.as_parfile_line = self.as_parfile_line_mask
+        self.is_prefix = True
 
     def __str__(self):
         out = self.name
@@ -1246,11 +1311,38 @@ class maskParameter(floatParameter):
     def select_toa_mask(self, toas):
         """Select the toas.
         Parameter
-        ----------
+        ---------
         toas : toas table
         Return
-        ----------
-        A mask array. the select toas are masked as True.
+        ------
+        A array of returned index.
         """
-        self.toa_select = TOASelect(self.key, self.key_value)
-        return self.toa_select.get_toa_key_mask(toas)
+        column_match = {'mjd': 'mjd_float',
+                        'freq': 'freq',
+                        'tel': 'obs'}
+        if len(self.key_value) == 1:
+            if not hasattr(self, 'toa_selector'):
+                self.toa_selector = TOASelect(is_range=False, use_hash=True)
+            condition = {self.name: self.key_value[0]}
+        elif len(self.key_value) == 2:
+            if not hasattr(self, 'toa_selector'):
+                self.toa_selector = TOASelect(is_range=True, use_hash=True)
+            condition = {self.name: tuple(self.key_value)}
+        else:
+            raise ValueError('Parameter %s has more key values than '
+                             'expected.(Expect 1 or 2 key values)' % self.name)
+        # get the table columns
+        # TODO Right now it is only supports mjd, freq, tel, and flagkeys,
+        # We need to consider some more complicated situation
+        key = self.key.replace('-', '')
+        if key not in column_match.keys(): # This only works for the one with flags.
+            section_name = key+'_section'
+            if section_name not in toas.keys():
+                flag_col = [x.get(key, None) for x in toas['flags']]
+                toas[section_name] = flag_col
+            col = toas[section_name]
+        else:
+            col = toas[column_match[key]]
+        select_idx = self.toa_selector.get_select_index(condition, col)
+
+        return select_idx[self.name]

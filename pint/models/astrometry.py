@@ -7,7 +7,7 @@ import astropy.constants as const
 from astropy.coordinates.angles import Angle
 from astropy import log
 from . import parameter as p
-from .timing_model import TimingModel, MissingParameter, Cache
+from .timing_model import DelayComponent, MissingParameter
 from ..utils import time_from_mjd_string, time_to_longdouble, str2longdouble
 from pint.pulsar_ecliptic import PulsarEcliptic, OBL
 from pint import ls
@@ -21,8 +21,8 @@ try:
 except ImportError:
     from astropy._erfa import DAYSEC as SECS_PER_DAY
 
-class Astrometry(TimingModel):
-
+class Astrometry(DelayComponent):
+    register = True
     def __init__(self):
         super(Astrometry, self).__init__()
         self.add_param(p.MJDParameter(name="POSEPOCH",
@@ -32,13 +32,14 @@ class Astrometry(TimingModel):
             units="mas", value=0.0,
             description="Parallax"))
 
-        self.delay_funcs['L1'] += [self.solar_system_geometric_delay,]
+        self.delay_funcs_component += [self.solar_system_geometric_delay,]
+        self.category = 'astrometry'
+        self.register_deriv_funcs(self.d_delay_astrometry_d_PX, 'PX')
 
     def setup(self):
         super(Astrometry, self).setup()
-        self.register_deriv_funcs(self.d_delay_astrometry_d_PX, 'delay', 'PX')
 
-    @Cache.cache_result
+
     def ssb_to_psb_xyz(self, epoch=None):
         """Returns unit vector(s) from SSB to pulsar system barycenter.
 
@@ -47,14 +48,13 @@ class Astrometry(TimingModel):
         # TODO: would it be better for this to return a 6-vector (pos, vel)?
         return self.coords_as_ICRS(epoch=epoch).cartesian.xyz.transpose()
 
-    @Cache.cache_result
     def barycentric_radio_freq(self, toas):
         """Return radio frequencies (MHz) of the toas corrected for Earth motion"""
         L_hat = self.ssb_to_psb_xyz(epoch=toas['tdbld'].astype(numpy.float64))
         v_dot_L_array = numpy.sum(toas['ssb_obs_vel']*L_hat, axis=1)
         return toas['freq'] * (1.0 - v_dot_L_array / const.c)
 
-    def solar_system_geometric_delay(self, toas):
+    def solar_system_geometric_delay(self, toas, acc_delay=None):
         """Returns geometric delay (in sec) due to position of site in
         solar system.  This includes Roemer delay and parallax.
 
@@ -70,9 +70,8 @@ class Astrometry(TimingModel):
             # TODO: numpy.sum currently loses units in some cases...
             re_sqr = numpy.sum(toas['ssb_obs_pos']**2, axis=1) * toas['ssb_obs_pos'].unit**2
             delay += (0.5 * (re_sqr / L) * (1.0 - re_dot_L**2 / re_sqr)).to(ls).value
-        return delay
+        return delay * u.second
 
-    #@Cache.use_cache
     def get_d_delay_quantities(self, toas):
         """Calculate values needed for many d_delay_d_param functions """
         # TODO: Move all these calculations in a separate class for elegance
@@ -103,8 +102,7 @@ class Astrometry(TimingModel):
 
         return rd
 
-    @Cache.use_cache
-    def d_delay_astrometry_d_PX(self, toas):
+    def d_delay_astrometry_d_PX(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt PX
 
         Roughly following Smart, 1977, chapter 9.
@@ -134,13 +132,13 @@ class Astrometry(TimingModel):
         # We want to return sec / mas
         return dd_dpx.decompose(u.si.bases) / u.mas
 
-    #@Cache.cache_result
-    def d_delay_astrometry_d_POSEPOCH(self, toas):
+    def d_delay_astrometry_d_POSEPOCH(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt POSEPOCH
         """
         pass
 
 class AstrometryEquatorial(Astrometry):
+    register = True
     def __init__(self):
         super(AstrometryEquatorial, self).__init__()
         self.add_param(p.AngleParameter(name="RAJ",
@@ -161,6 +159,11 @@ class AstrometryEquatorial(Astrometry):
             units="mas/year", value=0.0,
             description="Proper motion in DEC"))
         self.set_special_params(['RAJ', 'DECJ', 'PMRA', 'PMDEC'])
+        for param in ['RAJ', 'DECJ', 'PMRA', 'PMDEC']:
+            deriv_func_name = 'd_delay_astrometry_d_' + param
+            func = getattr(self, deriv_func_name)
+            self.register_deriv_funcs(func, param)
+
     def setup(self):
         super(AstrometryEquatorial, self).setup()
         # RA/DEC are required
@@ -176,12 +179,15 @@ class AstrometryEquatorial(Astrometry):
                 else:
                     self.POSEPOCH.quantity = self.PEPOCH.quantity
 
-        self.register_deriv_funcs(self.d_delay_astrometry_d_RAJ, 'delay', 'RAJ')
-        self.register_deriv_funcs(self.d_delay_astrometry_d_DECJ, 'delay', 'DEC')
-        self.register_deriv_funcs(self.d_delay_astrometry_d_PMRA, 'delay', 'PMRA')
-        self.register_deriv_funcs(self.d_delay_astrometry_d_PMDEC, 'delay', 'PMDEC')
+    def print_par(self):
+        result = ''
+        print_order = ['RAJ', 'DECJ', 'PMRA', 'PMDEC', 'PX', 'POSEPOCH']
+        for p in print_order:
+            par = getattr(self, p)
+            if par.quantity is not None:
+                result += getattr(self, p).as_parfile_line()
+        return result
 
-    #@Cache.cache_result
     def coords_as_ICRS(self, epoch=None):
         """Returns pulsar sky coordinates as an astropy ICRS object instance.
 
@@ -198,8 +204,7 @@ class AstrometryEquatorial(Astrometry):
             dDEC = dt * self.PMDEC.quantity
             return coords.ICRS(ra=self.RAJ.quantity+dRA, dec=self.DECJ.quantity+dDEC)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_RAJ(self, toas):
+    def d_delay_astrometry_d_RAJ(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt RAJ
 
         For the RAJ and DEC derivatives, use the following approximate model for
@@ -225,8 +230,7 @@ class AstrometryEquatorial(Astrometry):
 
         return dd_draj.decompose(u.si.bases)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_DECJ(self, toas):
+    def d_delay_astrometry_d_DECJ(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt DECJ
 
         Definitions as in d_delay_d_RAJ
@@ -243,8 +247,7 @@ class AstrometryEquatorial(Astrometry):
 
         return dd_ddecj.decompose(u.si.bases)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_PMRA(self, toas):
+    def d_delay_astrometry_d_PMRA(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt PMRA
 
         Definitions as in d_delay_d_RAJ. Now we have a derivative in mas/yr for
@@ -263,8 +266,7 @@ class AstrometryEquatorial(Astrometry):
         # We want to return sec / (mas / yr)
         return dd_dpmra.decompose(u.si.bases) / (u.mas / u.year)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_PMDEC(self, toas):
+    def d_delay_astrometry_d_PMDEC(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt PMDEC
 
         Definitions as in d_delay_d_RAJ. Now we have a derivative in mas/yr for
@@ -288,6 +290,7 @@ class AstrometryEquatorial(Astrometry):
 
 
 class AstrometryEcliptic(Astrometry):
+    register = True
     def __init__(self):
         super(AstrometryEcliptic, self).__init__()
         self.add_param(p.AngleParameter(name="ELONG",
@@ -310,10 +313,14 @@ class AstrometryEcliptic(Astrometry):
             description="Proper motion in ecliptic latitude",
             aliases=["PMBETA"]))
 
-        self.add_param(p.strParameter(name="ECL",
+        self.add_param(p.strParameter(name="ECL", value='IERS2003',
             description="Obliquity angle value secetion"))
 
         self.set_special_params(['ELONG', 'ELAT', 'PMELONG','PMELAT'])
+        for param in ['ELAT', 'ELONG', 'PMELAT', 'PMELONG']:
+            deriv_func_name = 'd_delay_astrometry_d_' + param
+            func = getattr(self, deriv_func_name)
+            self.register_deriv_funcs(func, param)
 
     def setup(self):
         super(AstrometryEcliptic, self).setup()
@@ -329,12 +336,7 @@ class AstrometryEcliptic(Astrometry):
                             "POSEPOCH or PEPOCH are required if PM is set.")
                 else:
                     self.POSEPOCH.quantity = self.PEPOCH.quantity
-        self.register_deriv_funcs(self.d_delay_astrometry_d_ELAT, 'delay', 'ELAT')
-        self.register_deriv_funcs(self.d_delay_astrometry_d_ELONG, 'delay', 'ELONG')
-        self.register_deriv_funcs(self.d_delay_astrometry_d_PMELAT, 'delay', 'PMELAT')
-        self.register_deriv_funcs(self.d_delay_astrometry_d_PMELONG, 'delay', 'PMELONG')
 
-    @Cache.cache_result
     def coords_as_ICRS(self, epoch=None):
         """Returns pulsar sky coordinates as an astropy ICRS object instance.
         Pulsar coordinates will be transform from ecliptic coordinates to ICRS
@@ -343,17 +345,18 @@ class AstrometryEcliptic(Astrometry):
 
         If the ecliptic coordinates are provided,
         """
+        try:
+            PulsarEcliptic.obliquity = OBL[self.ECL.value]
+        except KeyError:
+            raise ValueError("No obliquity " + str(self.ECL.value) + " provided. "
+                             "Check your pint/datafile/ecliptic.dat file.")
         if epoch is None or (self.PMELONG.value == 0.0 and self.PMELAT.value == 0.0):
-            pos_ecl = PulsarEcliptic(lon=self.ELONG.quantity, lat=self.ELAT.quantity)
+            dELONG = 0.0 * self.ELONG.units
+            dELAT = 0.0 * self.ELAT.units
         else:
             dt = (epoch - self.POSEPOCH.quantity.mjd) * u.d
             dELONG = dt * self.PMELONG.quantity / numpy.cos(self.ELAT.quantity.radian)
             dELAT = dt * self.PMELAT.quantity
-        try:
-            PulsarEcliptic.obliquity = OBL[self.ECL.value]
-        except KeyError:
-            raise ValueError("No obliquity " + self.ECL.value + " provided. "
-                             "Check your pint/datafile/ecliptic.dat file.")
 
         pos_ecl = PulsarEcliptic(lon=self.ELONG.quantity+dELONG, lat=self.ELAT.quantity+dELAT)
 
@@ -378,8 +381,7 @@ class AstrometryEcliptic(Astrometry):
 
         return rd
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_ELONG(self, toas):
+    def d_delay_astrometry_d_ELONG(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt RAJ
 
         For the RAJ and DEC derivatives, use the following approximate model for
@@ -414,8 +416,7 @@ class AstrometryEcliptic(Astrometry):
 
         return dd_delong.decompose(u.si.bases)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_ELAT(self, toas):
+    def d_delay_astrometry_d_ELAT(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt DECJ
 
         Definitions as in d_delay_d_RAJ
@@ -432,8 +433,7 @@ class AstrometryEcliptic(Astrometry):
 
         return dd_delat.decompose(u.si.bases)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_PMELONG(self, toas):
+    def d_delay_astrometry_d_PMELONG(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt PMRA
 
         Definitions as in d_delay_d_RAJ. Now we have a derivative in mas/yr for
@@ -453,8 +453,7 @@ class AstrometryEcliptic(Astrometry):
         # We want to return sec / (mas / yr)
         return dd_dpmelong.decompose(u.si.bases) / (u.mas / u.year)
 
-    #@Cache.use_cache
-    def d_delay_astrometry_d_PMELAT(self, toas):
+    def d_delay_astrometry_d_PMELAT(self, toas, param='', acc_delay=None):
         """Calculate the derivative wrt PMDEC
 
         Definitions as in d_delay_d_RAJ. Now we have a derivative in mas/yr for
@@ -475,3 +474,12 @@ class AstrometryEcliptic(Astrometry):
 
         # We want to return sec / (mas / yr)
         return dd_dpmelat.decompose(u.si.bases) / (u.mas / u.year)
+
+    def print_par(self):
+        result = ''
+        print_order = ['ELONG', 'ELAT', 'PMELONG', 'PMELAT', 'PX', 'ECL','POSEPOCH']
+        for p in print_order:
+            par = getattr(self, p)
+            if par.quantity is not None:
+                result += getattr(self, p).as_parfile_line()
+        return result
