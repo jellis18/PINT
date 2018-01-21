@@ -7,10 +7,13 @@ author: M. Kerr <matthew.kerr@gmail.com>
 
 """
 
+from __future__ import print_function
+
 import numpy as np
 from copy import deepcopy
 from lcnorm import NormAngles
 from lcprimitives import *
+from astropy import log
 
 class LCTemplate(object):
     """Manage a lightcurve template (collection of LCPrimitive objects).
@@ -164,7 +167,7 @@ class LCTemplate(object):
             try:
                 return self._cache[indices]
             except Exception:
-                print '%d phases were NaN!'%(np.sum(np.isnan(phases)))
+                print('%d phases were NaN!'%(np.sum(np.isnan(phases))))
                 indices[np.isnan(phases)] = 0
                 return self._cache[indices]
         rvals,norms,norm = self._get_scales(phases,log10_ens)
@@ -190,7 +193,6 @@ class LCTemplate(object):
         if add_bg:
             return rvals + n.sum(axis=0)
         return rvals
-
 
     def gradient(self,phases,log10_ens=3,free=True):
         r = np.empty([len(self.get_parameters(free=free)),len(phases)])
@@ -394,7 +396,7 @@ class LCTemplate(object):
         if not hasattr(indices,'__len__'):
             raise TypeError('indices must specify a list or array of indices')
         if len(indices)<2:
-            print 'Found fewer than 2 indices, returning.'
+            print('Found fewer than 2 indices, returning.')
             return
         norms,prims = self.norms(),self.primitives
         norms_free = self.norms.free.copy()
@@ -460,6 +462,48 @@ class LCTemplate(object):
             rvals += weight*prim(phases,en)*self.norms(en)[index]
         rvals /= w[0].sum()
         return rvals
+
+    def align_peak(self,phi=0,dphi=0.001):
+        """ Adjust such that template peak arrives within dphi of phi."""
+        self._cache_out_of_date = True
+        nbin = int(1./dphi)+1
+        # This shifts the first primitive to peak at phase 0.0
+        # Could instead use tallest primitive or some other feature
+        shift = -1.0*self.primitives[0].get_location()
+        log.info('Shifting profile peak by {0}'.format(shift))
+        for prim in self.primitives:
+            new_location = (prim.get_location() + shift)%1
+            prim.set_location(new_location)
+
+    def write_profile(self,fname,nbin,integral=False,suppress_bg=False):
+        """ Write out a two-column tabular profile to file fname.
+
+        The first column indicates the left edge of the phase bin, while
+        the right column indicates the profile value.
+
+        integral -- if True, integrate the profile over the bins.
+                    Otherwise, differential value at indicated bin phase.
+        suppress_bg -- if True, do not include the unpulsed (DC) component
+
+        """
+
+        if not integral:
+            bin_phases = np.linspace(0,1,nbin+1)[:-1]
+            bin_values = self(bin_phases,suppress_bg=suppress_bg)
+            bin_values *= 1./bin_values.mean()
+
+        else:
+            phases = np.linspace(0,1,2*nbin+1)
+            values = self(phases,suppress_bg=suppress_bg)
+            hi = values[2::2]
+            lo = values[0:-1:2]
+            mid = values[1::2]
+            bin_phases = phases[0:-1:2]
+            bin_values = 1./(6*nbin)*(hi+4*mid+lo)
+
+        bin_values *= 1./bin_values.mean()
+        open(fname,'w').write(''.join(('%.6f %.6f\n'%(x,y) for x,y in zip(bin_phases,bin_values))))
+
 
 class LCBridgeTemplate(LCTemplate):
     """ A light curve template specialized to the "typical" shape of a
@@ -556,7 +600,7 @@ class LCBridgeTemplate(LCTemplate):
 
     def mean_single_component(self,index,phases,log10_ens=None,weights=None,bins=20,add_pedestal=False):
         #if add_pedestal:
-            #print 'No add pedestal.'
+            #print('No add pedestal.')
         # this needs to be done in some sane way, not sure if ideal exists
         #raise NotImplementedError()
         if (log10_ens is None) or (not self.is_energy_dependent()):
@@ -663,9 +707,9 @@ def prim_io(template):
                 norms.append(float(tok[2]))
         return primitives,norms
 
-    toks = [line.strip().split() for line in file(template) if len(line.strip()) > 0]
+    toks = [line.strip().split() for line in open(template) if len(line.strip()) > 0]
     if 'gauss' in toks[0]:     return read_gaussian(toks[1:])
     elif 'kernel' in toks[0]:  return [LCKernelDensity(input_file=toks[1:])],None
     elif 'fourier' in toks[0]: return [LCEmpiricalFourier(input_file=toks[1:])],None
-    raise ValueError,'Template format not recognized!'
+    raise ValueError('Template format not recognized!')
 

@@ -7,7 +7,6 @@ import pint.toa as toa
 import pint.models
 import pint.residuals
 import astropy.units as u
-import matplotlib.pyplot as plt
 from pint.fermi_toas import load_Fermi_TOAs
 from pint.plot_utils import phaseogram
 from pint.observatory.fermi_obs import FermiObs
@@ -18,6 +17,8 @@ from pint.eventstats import hmw, hm, h2sig
 from astropy.coordinates import SkyCoord
 
 from astropy import log
+
+#log.setLevel('DEBUG')
 
 def main(argv=None):
 

@@ -24,10 +24,11 @@ toa_commands = ("DITHER", "EFAC", "EMAX", "EMAP", "EMIN", "EQUAD", "FMAX",
 
 iers_a_file = None
 iers_a = None
+JD_MJD = 2400000.5
 
-
-def get_TOAs(timfile, ephem="DE421", include_bipm=True,
-             include_gps=True, planets=False, usepickle=False):
+def get_TOAs(timfile, ephem="DE421", include_bipm=True, bipm_version='BIPM2015',
+             include_gps=True, planets=False, usepickle=False,
+             tdb_method="astropy"):
     """Convenience function to load and prepare TOAs for PINT use.
 
     Loads TOAs from a '.tim' file, applies clock corrections, computes
@@ -48,14 +49,12 @@ def get_TOAs(timfile, ephem="DE421", include_bipm=True,
             updatepickle = True
     t = TOAs(timfile)
     if not any(['clkcorr' in f for f in t.table['flags']]):
-        log.info("Applying clock corrections.")
         t.apply_clock_corrections(include_gps=include_gps,
-                                  include_bipm=include_bipm)
+                                  include_bipm=include_bipm,
+                                  bipm_version=bipm_version)
     if 'tdb' not in t.table.colnames:
-        log.info("Getting IERS params and computing TDBs.")
-        t.compute_TDBs()
+        t.compute_TDBs(method=tdb_method, ephem=ephem)
     if 'ssb_obs_pos' not in t.table.colnames:
-        log.info("Computing observatory positions and velocities.")
         t.compute_posvels(ephem, planets)
     # Update pickle if needed:
     if usepickle and updatepickle:
@@ -96,7 +95,8 @@ def _check_pickle(toafilename, picklefilename=None):
     return picklefilename
 
 def get_TOAs_list(toa_list,ephem="DE421", include_bipm=True,
-                  include_gps=True, planets=False):
+                  bipm_version='BIPM2015', include_gps=True, planets=False,
+                  tdb_method="astropy"):
     """Load TOAs from a list of TOA objects.
 
     Compute the TDB time and observatory positions and velocity
@@ -107,15 +107,13 @@ def get_TOAs_list(toa_list,ephem="DE421", include_bipm=True,
     [default=True].
     """
     t = TOAs(toalist = toa_list)
-    if not any([f.has_key('clkcorr') for f in t.table['flags']]):
-        log.info("Applying clock corrections.")
+    if not any(['clkcorr' in f for f in t.table['flags']]):
         t.apply_clock_corrections(include_gps=include_gps,
-                                  include_bipm=include_bipm)
+                                  include_bipm=include_bipm,
+                                  bipm_version=bipm_version)
     if 'tdb' not in t.table.colnames:
-        log.info("Getting IERS params and computing TDBs.")
-        t.compute_TDBs()
+        t.compute_TDBs(method=tdb_method, ephem=ephem)
     if 'ssb_obs_pos' not in t.table.colnames:
-        log.info("Computing observatory positions and velocities.")
         t.compute_posvels(ephem, planets)
     return t
 
@@ -288,7 +286,7 @@ def format_toa_line(toatime, toaerr, freq, obs, dm=0.0*u.pc/u.cm**3, name='unk',
                 toa_str, toaerr.to(u.us).value)
     else:
         log.error('Unknown TOA format ({0})'.format(format))
-        # Should this raise an exception here? -- paulr
+        # Should this raise an exception here? -- @paulray
 
     return out
 
@@ -638,7 +636,7 @@ class TOAs(object):
             handle = True
         if format.upper() in ('TEMPO2','1'):
             outf.write('FORMAT 1\n')
-        # NOTE(paulr): This really should REMOVE any(?) clock corrections
+        # NOTE(@paulray): This really should REMOVE any(?) clock corrections
         # that have been applied!
         for toatime,toaerr,freq,obs,flags in zip(self.table['mjd'],self.table['error'].quantity,
             self.table['freq'].quantity,self.table['obs'],self.table['flags']):
@@ -650,6 +648,7 @@ class TOAs(object):
             outf.close()
 
     def apply_clock_corrections(self, include_bipm=True,
+                                bipm_version="BIPM2015",
                                 include_gps=True):
         """Apply observatory clock corrections and TIME statments.
 
@@ -673,19 +672,21 @@ class TOAs(object):
         #     log.warn("Some TOAs have 'clkcorr' flag.  Not applying new clock corrections.")
         #     return
         # An array of all the time corrections, one for each TOA
+        log.info("Applying clock corrections.")
         corr = numpy.zeros(self.ntoas) * u.s
         times = self.table['mjd']
         for ii, key in enumerate(self.table.groups.keys):
             grp = self.table.groups[ii]
             obs = self.table.groups.keys[ii]['obs']
             site = get_observatory(obs, include_gps=include_gps,
-                                   include_bipm=include_bipm)
+                                   include_bipm=include_bipm,
+                                   bipm_version=bipm_version)
             loind, hiind = self.table.groups.indices[ii:ii+2]
             # First apply any TIME statements
             for jj in range(loind, hiind):
                 if 'to' in flags[jj]:
                     # TIME commands are in sec
-                    # SUGGESTION(paulr): These time correction units should
+                    # SUGGESTION(@paulray): These time correction units should
                     # be applied in the parser, not here. In the table the time
                     # correction should have units.
                     corr[jj] = flags[jj]['to'] * u.s
@@ -700,9 +701,8 @@ class TOAs(object):
                 if corr[jj]:
                     flags[jj]['clkcorr'] = corr[jj]
 
-    def compute_TDBs(self):
+    def compute_TDBs(self, method="astropy", ephem=None):
         """Compute and add TDB and TDB long double columns to the TOA table.
-
         This routine creates new columns 'tdb' and 'tdbld' in a TOA table
         for TDB times, using the Observatory locations and IERS A Earth
         rotation corrections for UT1.
@@ -721,8 +721,9 @@ class TOAs(object):
             grp = self.table.groups[ii]
             obs = self.table.groups.keys[ii]['obs']
             loind, hiind = self.table.groups.indices[ii:ii+2]
+            site = get_observatory(obs)
             grpmjds = time.Time(grp['mjd'], location=grp['mjd'][0].location)
-            grptdbs = grpmjds.tdb
+            grptdbs = site.get_TDBs(grpmjds, method=method, ephem=ephem)
             tdbs[loind:hiind] = numpy.asarray([t for t in grptdbs])
 
         # Now add the new columns to the table
@@ -742,7 +743,7 @@ class TOAs(object):
         """
         # Record the planets choice for this instance
         self.planets = planets
-        log.info('Compute positions and velocities of observatories and Earth (planets = {0}), using {1} ephemeris'.format(planets, ephem))
+        log.info('Computing positions and velocities of observatories and Earth (planets = {0}), using {1} ephemeris'.format(planets, ephem))
         # Remove any existing columns
         cols_to_remove = ['ssb_obs_pos', 'ssb_obs_vel', 'obs_sun_pos']
         for c in cols_to_remove:
@@ -779,8 +780,9 @@ class TOAs(object):
             obs = self.table.groups.keys[ii]['obs']
             loind, hiind = self.table.groups.indices[ii:ii+2]
             site = get_observatory(obs)
-            tdb = time.Time(grp['tdb'])
+            tdb = time.Time(grp['tdb'],precision=9)
             ssb_obs = site.posvel(tdb,ephem)
+            log.debug("SSB obs pos {0}".format(ssb_obs.pos[:,0]))
             ssb_obs_pos[loind:hiind,:] = ssb_obs.pos.T.to(u.km)
             ssb_obs_vel[loind:hiind,:] = ssb_obs.vel.T.to(u.km/u.s)
             sun_obs = objPosVel_wrt_SSB('sun',tdb,ephem) - ssb_obs
@@ -874,6 +876,7 @@ class TOAs(object):
                         # Save FORMAT in a tmp
                         fmt = self.cdict["FORMAT"]
                         self.cdict["FORMAT"] = "Unknown"
+                        log.info("Processing included TOA file {0}".format(d["Command"][1]))
                         self.read_toa_file(d["Command"][1], top=False)
                         # re-set FORMAT
                         self.cdict["FORMAT"] = fmt

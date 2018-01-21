@@ -50,9 +50,9 @@ def main(argv=None):
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(8,4.5))
         xt = t.get_mjds()
-        ax.errorbar(xt,prefit_resids.to(u.us).value,
+        ax.errorbar(xt.value, prefit_resids.to(u.us).value,
                     t.get_errors().to(u.us).value, fmt='o')
-        ax.errorbar(xt,
+        ax.errorbar(xt.value,
               f.resids.time_resids.to(u.us).value,
               t.get_errors().to(u.us).value, fmt='x')
         ax.set_title("%s Timing Residuals" % m.PSR.value)
@@ -65,7 +65,7 @@ def main(argv=None):
             plt.show()
 
     if args.outfile is not None:
-        fout = file(args.outfile,"w")
+        fout = open(args.outfile,"w")
     else:
         fout = sys.stdout
         print("\nBest fit model is:")

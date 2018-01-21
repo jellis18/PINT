@@ -13,7 +13,7 @@ from pint.event_toas import load_XMM_TOAs
 from pint.plot_utils import phaseogram_binned
 from pint.observatory.nicer_obs import NICERObs
 from pint.observatory.rxte_obs import RXTEObs
-from astropy.time import Time
+from astropy.time import Time, TimeDelta
 from pint.eventstats import hmw, hm, h2sig
 from astropy.coordinates import SkyCoord
 from astropy import log
@@ -32,9 +32,9 @@ def main(argv=None):
     parser.add_argument("--absphase",help="Write FITS file with integral portion of pulse phase (ABS_PHASE)",default=False,action='store_true')
     parser.add_argument("--barytime",help="Write FITS file with a column containing the barycentric time as double precision MJD.",default=False,action='store_true')
     parser.add_argument("--outfile",help="Output FITS file name (default=same as eventfile)", default=None)
-    parser.add_argument("--planets",help="Use planetary Shapiro delay in calculations (default=False)", default=False, action="store_true")
     parser.add_argument("--ephem",help="Planetary ephemeris to use (default=DE421)", default="DE421")
     parser.add_argument("--plot",help="Show phaseogram plot.", action='store_true', default=False)
+    parser.add_argument("--fix",help="Apply 1.0 second offset for NICER", action='store_true', default=False)
     args = parser.parse_args(argv)
 
     # If outfile is specified, that implies addphase
@@ -80,15 +80,6 @@ def main(argv=None):
     # Read in model
     modelin = pint.models.get_model(args.parfile)
 
-    # Discard SS Shapiro part if specified in ephemeris and not enabled
-    if (not args.planets) and (
-            'SolarSystemShapiro' in modelin.components.keys()):
-        log.info(
-            "Removing SS Shapiro component from model (planets=False).")
-        components = modelin.components
-        components.pop('SolarSystemShapiro')
-        modelin.setup_components(components.values())
-
     # Discard events outside of MJD range
     if args.maxMJD is not None:
         tlnew = []
@@ -102,19 +93,27 @@ def main(argv=None):
         print("post len : ",len(tlnew))
 
     # Now convert to TOAs object and compute TDBs and posvels
+    if len(tl) == 0:
+        log.error("No TOAs, exiting!")
+        sys.exit(0)
     ts = toa.TOAs(toalist=tl)
     ts.filename = args.eventfile
+    if args.fix:
+        ts.adjust_TOAs(TimeDelta(np.ones(len(ts.table))*-1.0*u.s,scale='tt'))
     ts.compute_TDBs()
-    ts.compute_posvels(ephem=args.ephem,planets=args.planets)
+    # Could add a check here to only compute planet positions if PLANET_SHAPIRO is true.
+    # For now, just being lazy and always computing planet positions.
+    ts.compute_posvels(ephem=args.ephem,planets=True)
 
     print(ts.get_summary())
     mjds = ts.get_mjds()
     print(mjds.min(),mjds.max())
 
     # Compute model phase for each TOA
-    phss = modelin.phase(ts.table)[1]
+    iphss,phss = modelin.phase(ts.table)
     # ensure all postive
-    phases = np.where(phss < 0.0 * u.cycle, phss + 1.0 * u.cycle, phss)
+    negmask = phss < 0.0 * u.cycle
+    phases = np.where(negmask, phss + 1.0 * u.cycle, phss)
     h = float(hm(phases))
     print("Htest : {0:.2f} ({1:.2f} sigma)".format(h,h2sig(h)))
     if args.plot:
@@ -131,7 +130,7 @@ def main(argv=None):
             raise RuntimeError('Mismatch between length of FITS table ({0}) and length of phase array ({1})!'.format(len(hdulist[1].data),len(phases)))
         data_to_add = {'PULSE_PHASE':[phases,'D']}
         if args.absphase:
-            data_to_add['ABS_PHASE'] = [modelin.phase(ts.table)[0],'K']
+            data_to_add['ABS_PHASE'] = [iphss-negmask*u.cycle,'K']
         if args.barytime:
             tdbs = np.asarray([t.mjd for t in ts.table['tdb']])
             data_to_add['BARY_TIME'] = [tdbs,'D']
@@ -143,7 +142,7 @@ def main(argv=None):
             else:
                 # Construct and append new column, preserving HDU header and name
                 log.info('Adding new %s column.'%key)
-                datacol = pyfits.ColDefs([pyfits.Column(name=key, 
+                datacol = pyfits.ColDefs([pyfits.Column(name=key,
                     format=data_to_add[key][1], array=data_to_add[key][0])])
                 bt = pyfits.BinTableHDU.from_columns(
                     hdulist[1].columns + datacol, header=hdulist[1].header,

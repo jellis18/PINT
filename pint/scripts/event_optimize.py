@@ -8,6 +8,7 @@ import pint.fermi_toas as fermi
 import pint.plot_utils as plot_utils
 from pint.eventstats import hmw, hm
 from pint.models.priors import Prior, UniformUnboundedRV, UniformBoundedRV, GaussianBoundedRV
+from pint.observatory.fermi_obs import FermiObs
 from scipy.stats import norm, uniform
 import matplotlib.pyplot as plt
 import astropy.table
@@ -221,7 +222,7 @@ class emcee_fitter(Fitter):
         """
         phss = self.model.phase(self.toas.table)[1]
         # ensure all postive
-        return np.where(phss < 0.0, phss + 1.0, phss)
+        return np.where(phss < 0.0*u.cycle, phss + 1.0*u.cycle, phss)
 
     def lnprior(self, theta):
         """
@@ -284,7 +285,7 @@ class emcee_fitter(Fitter):
         """
         Make a nice 2-panel phaseogram for the current model
         """
-        mjds = self.toas.table['tdbld'].astype(np.float64)
+        mjds = self.toas.table['tdbld'].quantity
         phss = self.get_event_phases()
         plot_utils.phaseogram(mjds, phss, weights=self.weights, bins=bins,
             rotate=rotate, size=size, alpha=alpha, plotfile=plotfile)
@@ -345,6 +346,7 @@ def main(argv=None):
     parser.add_argument("eventfile",help="event file to use")
     parser.add_argument("parfile",help="par file to read model from")
     parser.add_argument("gaussianfile",help="gaussian file that defines template")
+    parser.add_argument("--ft2",help="Path to FT2 file.",default=None)
     parser.add_argument("--weightcol",help="name of weight column (or 'CALC' to have them computed",default=None)
     parser.add_argument("--nwalkers",help="Number of MCMC walkers (def 200)",type=int,
         default=200)
@@ -381,6 +383,10 @@ def main(argv=None):
     parfile = args.parfile
     gaussianfile = args.gaussianfile
     weightcol = args.weightcol
+
+    if args.ft2 is not None:
+        # Instantiate FermiObs once so it gets added to the observatory registry
+        FermiObs(name='Fermi',ft2name=args.ft2)
 
     nwalkers = args.nwalkers
     burnin = args.burnin
@@ -459,7 +465,7 @@ def main(argv=None):
             (len(weights), weights.min(), weights.max()))
     else:
         weights = None
-        print("There are %d events, no weights are being used." % (len(weights)))
+        print("There are %d events, no weights are being used." % ts.ntoas)
 
     # Now load in the gaussian template and normalize it
     gtemplate = read_gaussfitfile(gaussianfile, nbins)
